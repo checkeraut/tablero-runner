@@ -1,0 +1,106 @@
+name: Tablero
+
+# Actualiza el tablero de un repo privado. Este repo es público solo para que GitHub Actions no
+# cobre minutos (noviembre de 2026); en diciembre se borra y todo vuelve al repo privado.
+# Acá no hay datos ni código: la corrida baja el repo privado con una llave de despliegue, corre
+# sus scripts y guarda el resultado allá. Los registros de esta página son públicos, así que cada
+# paso escribe su salida completa en un archivo y acá solo se muestran líneas de conteo, nunca
+# nombres. Si un paso falla, su salida completa se guarda en el repo privado (cache/logs-runner/).
+on:
+  schedule:
+    - cron: '7,37 10-23 * * *'   # cada media hora, de 07:07 a 20:37 de Chile (UTC-3)
+    - cron: '7,37 0-2 * * *'     # y de 21:07 a 23:37
+    - cron: '15 7 * * *'         # el completo, 04:15 de Chile
+  workflow_dispatch:
+    inputs:
+      completo:
+        description: 'Build completo, sin reusar lo guardado'
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+concurrency:
+  group: tablero
+  cancel-in-progress: false
+
+jobs:
+  refrescar:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      GHL_TOKEN:            ${{ secrets.GHL_TOKEN }}
+      GHL_LOCATION_ID:      ${{ secrets.GHL_LOCATION_ID }}
+      SUPABASE_TOKEN:       ${{ secrets.SUPABASE_TOKEN }}
+      SUPABASE_PROJECT_REF: ${{ secrets.SUPABASE_PROJECT_REF }}
+      N8N_URL:              ${{ secrets.N8N_URL }}
+      N8N_VENTAS_SECRET:    ${{ secrets.N8N_VENTAS_SECRET }}
+      N8N_API_KEY:          ${{ secrets.N8N_API_KEY }}
+      META_TOKEN_USER1:     ${{ secrets.META_TOKEN_USER1 }}
+      META_TOKEN_USER2:     ${{ secrets.META_TOKEN_USER2 }}
+      SIN_CACHE: ${{ (github.event.schedule == '15 7 * * *' || inputs.completo) && '1' || '' }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          repository: checkeraut/ricardo-puelma
+          ref: main
+          ssh-key: ${{ secrets.RP_DEPLOY_KEY }}
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      # Mismo orden que el workflow del repo privado: ventas y propuestas a Meta, Closers, tablero,
+      # pestaña Ventas. TikTok queda afuera: está apagado desde el 11/11/2026.
+      - name: Actualizar (solo se muestran conteos)
+        run: |
+          mkdir -p /tmp/log
+          FALLO=""
+          SEGURO='(Listo:|en la ventana|AVISO|Supabase [0-9]|Tiempos:|ventas en total|el tablero cuenta|propuestas: [0-9]|clientes con propuesta|Llamadas de venta en el archivo|Últimos 90 días)'
+          paso() {
+            nombre="$1"; dir="$2"; shift 2
+            if (cd "$dir" && "$@") > "/tmp/log/$nombre.txt" 2>&1; then echo "✓ $nombre"; else echo "✗ $nombre"; FALLO="$FALLO $nombre"; fi
+            grep -E "$SEGURO" "/tmp/log/$nombre.txt" | grep -v -E '^\s*[✓✗·]' | cut -c1-180 | sed 's/^/    /' || true
+          }
+          paso ventas-a-meta     .    node scripts/enviar-ventas.mjs
+          paso propuestas-a-meta .    node scripts/enviar-propuestas.mjs
+          paso closers           dash node closers.mjs --dias 21
+          paso tablero           dash node build.mjs
+          paso pestana-ventas    dash node ventas.mjs
+          echo "FALLO=$FALLO" >> "$GITHUB_ENV"
+
+      - name: Publicar en el repo privado
+        run: |
+          git config user.name  "checkeraut"
+          git config user.email "217237723+checkeraut@users.noreply.github.com"
+          ENVIADAS="cache/ventas-enviadas.json cache/ventas-enviadas-tiktok.json cache/propuestas-enviadas.json"
+          GENERADOS="dash/index.html dash/datos.json dash/closers.html dash/closers.json dash/ventas.html dash/ventas.json dash/tiktok.html dash/tiktok.json cache/tiktok-ads.json cache/citas.json cache/router.json cache/contactos.json cache/presupuestos.json cache/ventas-anuncio.json cache/origen-conversacion.json cache/meta-horas.json cache/videos-anuncios.json"
+          # Si algo falló, su salida completa va al repo privado (acá no se puede mostrar).
+          LOGS=""
+          if [ -n "$FALLO" ]; then mkdir -p cache/logs-runner && cp /tmp/log/*.txt cache/logs-runner/ && LOGS="cache/logs-runner"; fi
+          agregar() { for f in $1; do if [ -e "$f" ]; then git add -- "$f"; fi; done; }
+          guardar() { rm -rf /tmp/pub && mkdir -p /tmp/pub && for f in $1; do if [ -e "$f" ]; then mkdir -p "/tmp/pub/$(dirname "$f")" && cp -r "$f" "/tmp/pub/$f"; fi; done; }
+          reponer() { for f in $1; do if [ -e "/tmp/pub/$f" ]; then mkdir -p "$(dirname "$f")" && rm -rf "$f" && cp -r "/tmp/pub/$f" "$f"; fi; done; }
+          mensaje() { echo "datos: tablero, ventas y closers al $(date -u '+%Y-%m-%d %H:%M') UTC"; }
+          if [ -z "$(git status --porcelain -- $GENERADOS $ENVIADAS $LOGS)" ]; then echo "Los datos no cambiaron."; exit 0; fi
+          BASE="$(git rev-parse HEAD)"
+          guardar "$GENERADOS $ENVIADAS $LOGS"; agregar "$GENERADOS $ENVIADAS $LOGS"
+          git commit -q -m "$(mensaje)"
+          # Lo que SIEMPRE se guarda es la lista de lo enviado a Meta; las páginas no se pisan si
+          # alguien publicó cambios de código encima mientras corría.
+          QUE="$GENERADOS $ENVIADAS $LOGS"
+          for intento in 1 2 3; do
+            if git push -q origin HEAD:main; then echo "Publicado."; exit 0; fi
+            git fetch -q origin main
+            if ! git diff --quiet "$BASE" origin/main -- $GENERADOS; then QUE="$ENVIADAS $LOGS"; fi
+            git reset -q --hard origin/main; reponer "$QUE"; agregar "$QUE"
+            if git diff --cached --quiet; then echo "Sin cambios contra lo publicado."; exit 0; fi
+            git commit -q -m "$(mensaje)"
+          done
+          exit 1
+
+      - name: ¿Falló algo?
+        run: |
+          if [ -n "$FALLO" ]; then echo "::error::Falló:$FALLO. El detalle quedó en cache/logs-runner/ del repo privado."; exit 1; fi
+          echo "Todo bien."

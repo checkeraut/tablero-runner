@@ -1,0 +1,44 @@
+name: Comision
+
+# La comisión semanal (comision/ del repo privado). Mismo esquema que tablero.yml: baja el repo
+# privado, calcula allá y guarda allá; acá solo conteos.
+on:
+  schedule:
+    - cron: '0 13 * * 1'   # lunes, 10:00 de Chile
+    - cron: '0 13 1 * *'   # el día 1
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  comision:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    env:
+      GHL_TOKEN:            ${{ secrets.GHL_TOKEN }}
+      GHL_LOCATION_ID:      ${{ secrets.GHL_LOCATION_ID }}
+      SUPABASE_TOKEN:       ${{ secrets.SUPABASE_TOKEN }}
+      SUPABASE_PROJECT_REF: ${{ secrets.SUPABASE_PROJECT_REF }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          repository: checkeraut/ricardo-puelma
+          ref: main
+          fetch-depth: 0   # el dólar de cada día sale de la historia de dash/datos.json
+          ssh-key: ${{ secrets.RP_DEPLOY_KEY }}
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+      - name: Calcular (solo se muestran totales)
+        run: |
+          node scripts/comision-juanma.mjs --salida /tmp/comision.json > /tmp/c.txt 2>&1 && node scripts/comision-juanma-publicar.mjs /tmp/comision.json >> /tmp/c.txt 2>&1
+          rc=$?; grep -E '^(Clientes:|Total:|Listo:)' /tmp/c.txt | cut -c1-160 || true; exit $rc
+      - name: Publicar en el repo privado
+        run: |
+          git config user.name  "checkeraut"
+          git config user.email "217237723+checkeraut@users.noreply.github.com"
+          if [ -z "$(git status --porcelain -- comision)" ]; then echo "Sin cambios."; exit 0; fi
+          git add comision && git commit -q -m "comisión: actualizada al $(date -u '+%Y-%m-%d')"
+          for intento in 1 2 3; do git push -q origin HEAD:main && exit 0; git pull -q --rebase origin main; done
+          exit 1
