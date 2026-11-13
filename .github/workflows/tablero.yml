@@ -6,6 +6,7 @@ name: Tablero
 # sus scripts y guarda el resultado allá. Los registros de esta página son públicos, así que cada
 # paso escribe su salida completa en un archivo y acá solo se muestran líneas de conteo, nunca
 # nombres. Si un paso falla, su salida completa se guarda en el repo privado (cache/logs-runner/).
+# Si el cron deja de disparar (pasó el 13/11 tras un force-push), un commit normal a este archivo lo reengancha.
 on:
   schedule:
     - cron: '7,37 10-23 * * *'   # cada media hora, de 07:07 a 20:37 de Chile (UTC-3)
