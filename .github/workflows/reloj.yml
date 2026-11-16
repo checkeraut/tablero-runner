@@ -1,0 +1,70 @@
+name: Reloj
+
+# GitHub dispara los cron de este repo cada 4 a 5 horas en vez de cada media hora (lo medimos del 13 al
+# 16/11), pero el disparo manual arranca al instante. Este reloj queda prendido y larga "Tablero" en
+# cada horario de Chile: a las :07 y :37 de 07:07 a 23:37, más el completo a las 04:15.
+# Una tarea de GitHub dura como mucho 6 horas, así que a las 5 h 40 min se relanza sola.
+# Si se cae, el cron de abajo lo revive cuando GitHub lo dispare. El cron de tablero.yml sigue de respaldo.
+# Temporal como todo este repo: en diciembre se borra.
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: '23 */2 * * *'
+
+permissions:
+  actions: write
+  contents: read
+
+# Un solo reloj a la vez: si otro arranca mientras este corre, espera; el de más atrás se cancela.
+concurrency:
+  group: reloj
+  cancel-in-progress: false
+
+jobs:
+  reloj:
+    runs-on: ubuntu-latest
+    timeout-minutes: 350
+    steps:
+      - name: Largar el tablero en cada horario
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        shell: python
+        run: |
+          import subprocess, time
+          from datetime import datetime, timedelta
+          from zoneinfo import ZoneInfo
+
+          TZ = ZoneInfo('America/Santiago')
+          FIN = time.time() + 5 * 3600 + 40 * 60
+
+          def proximo(ahora):
+              for dia in range(3):
+                  fecha = (ahora + timedelta(days=dia)).date()
+                  horarios = [(4, 15, True)] + [(h, m, False) for h in range(7, 24) for m in (7, 37)]
+                  for h, m, completo in horarios:
+                      t = datetime(fecha.year, fecha.month, fecha.day, h, m, tzinfo=TZ)
+                      if t > ahora:
+                          return t, completo
+
+          def largar(argumentos):
+              for intento in range(6):
+                  if subprocess.run(['gh', 'workflow', 'run', *argumentos]).returncode == 0:
+                      return True
+                  time.sleep(30)
+              return False
+
+          while True:
+              ahora = datetime.now(TZ)
+              t, completo = proximo(ahora)
+              espera = (t - ahora).total_seconds()
+              if time.time() + espera > FIN:
+                  break
+              print(f"Próximo: {t:%d/%m %H:%M} de Chile{' (completo)' if completo else ''}", flush=True)
+              time.sleep(espera)
+              ok = largar(['tablero.yml', '-f', f"completo={'true' if completo else 'false'}"])
+              print('Tablero largado.' if ok else 'No pude largar el tablero.', flush=True)
+
+          print('Me relanzo para seguir.', flush=True)
+          if not largar(['reloj.yml']):
+              raise SystemExit('No pude relanzar el reloj: lo revive el cron o se larga a mano.')
